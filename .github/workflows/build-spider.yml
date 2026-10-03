@@ -1,0 +1,134 @@
+# ============================================================
+# 云编译 spider.jar —— GitHub Actions 全自动管线（含合并增强）
+#
+# 一句话原理：源码在你【自己的仓库】→ 云端自动编译 → jar 写回
+# 【你自己的仓库】。别人删库、跑路都影响不到你。
+#
+# 使用步骤：
+#   1. 网页打开 https://github.com/bizhangjie/CatVodSpider → 右上角
+#      Fork → 选自己的账号（1 分钟，不需要任何命令、不需要 token）
+#   2. 在【你自己的 fork 仓库】新建文件，路径：
+#      .github/workflows/build-spider.yml（内容粘贴本文件）
+#   3. 打开你 fork 仓库的 Actions 页 → 左侧 "Build Spider Jar"
+#      → Run workflow → 选择模式 → 运行
+#   4. 跑完，你仓库出现 jar/custom_spider.jar —— 属于你的 jar
+#      配置地址：
+#      https://ghfast.top/https://raw.githubusercontent.com/<你的账号>/CatVodSpider/main/jar/custom_spider.jar
+#   5. 以后更新：再点一次 Run workflow，全程不用开电脑
+#
+# 两种模式（Run workflow 时选择）：
+#   · 纯净编译：只用源码的 65 个爬虫类
+#   · 合并增强（推荐）：把旧 jar（97 类，含小苹果系 XBPQ/XYQBiu 等）
+#     独有的爬虫合并进来 → 产出 120+ 类的超级 jar
+#     （旧 jar 地址填你 nzsm/tvbox-server 的：可空，默认用镜像地址）
+# ============================================================
+name: Build Spider Jar
+
+on:
+  workflow_dispatch:
+    inputs:
+      merge_old:
+        description: '合并增强：把旧 jar 独有的爬虫也合进来（推荐）'
+        type: boolean
+        default: true
+      old_jar_url:
+        description: '旧 jar 下载地址（合并时用；留空用默认镜像）'
+        type: string
+        default: 'https://ghfast.top/https://raw.githubusercontent.com/nzsm/tvbox-server/main/jar/spider.jar'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 源码（自己的 fork，自持）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android SDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-33" "build-tools;33.0.1" >/dev/null 2>&1 || true
+
+      - name: Gradle 编译（R8 混淆）
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: 下载旧 jar（合并模式）
+        if: ${{ github.event.inputs.merge_old == 'true' }}
+        run: |
+          URL="${{ github.event.inputs.old_jar_url }}"
+          curl -L -m 120 -o old_spider.jar "$URL"
+          ls -la old_spider.jar
+          unzip -o old_spider.jar -d old_jar_unzip
+          ls old_jar_unzip/
+
+      - name: 打包（纯净或合并）
+        run: |
+          set -e
+          DEX="app/build/intermediates/dex/release/minifyReleaseWithR8/classes.dex"
+          ls -la "$DEX"
+          # ---- 反编译新源码的 dex ----
+          rm -rf smali_new && mkdir -p smali_new
+          java -jar jar/3rd/baksmali-2.5.2.jar d "$DEX" -o smali_new
+          SPIDER_DIR="smali_new/com/github/catvod/spider"
+          PARSER_DIR="smali_new/com/github/catvod/parser"
+          JS_DIR="smali_new/com/github/catvod/js"
+          echo "新源码爬虫类数: $(find $SPIDER_DIR -name '*.smali' 2>/dev/null | wc -l)"
+
+          # ---- 合并模式：把旧 jar 独有的类补进来 ----
+          if [ -d "old_jar_unzip" ] && [ "${{ github.event.inputs.merge_old }}" = "true" ]; then
+            echo "进入合并增强模式……"
+            rm -rf smali_old && mkdir -p smali_old
+            java -jar jar/3rd/baksmali-2.5.2.jar d old_jar_unzip/classes.dex -o smali_old
+            OLD_SPIDER="smali_old/com/github/catvod/spider"
+            ADD=0
+            if [ -d "$OLD_SPIDER" ]; then
+              for f in "$OLD_SPIDER"/*.smali; do
+                b=$(basename "$f")
+                if [ ! -f "$SPIDER_DIR/$b" ]; then
+                  cp "$f" "$SPIDER_DIR/$b"; ADD=$((ADD+1))
+                fi
+              done
+            fi
+            echo "✅ 合并补入旧 jar 独有爬虫类: $ADD 个"
+            echo "合并后爬虫类总数: $(find $SPIDER_DIR -name '*.smali' | wc -l)"
+          fi
+
+          # ---- apktool 重打包 ----
+          rm -rf spider_build && cp -r jar/spider.jar spider_build
+          rm -rf spider_build/smali/com/github/catvod/spider \
+                 spider_build/smali/com/github/catvod/parser \
+                 spider_build/smali/com/github/catvod/js
+          mkdir -p spider_build/smali/com/github/catvod
+          mv "$SPIDER_DIR" spider_build/smali/com/github/catvod/ 2>/dev/null || true
+          mv "$PARSER_DIR" spider_build/smali/com/github/catvod/ 2>/dev/null || true
+          mv "$JS_DIR" spider_build/smali/com/github/catvod/ 2>/dev/null || true
+          java -jar jar/3rd/apktool_2.4.1.jar b spider_build -c
+          cp spider_build/dist/dex.jar jar/custom_spider.jar
+          md5sum jar/custom_spider.jar | awk '{print $1}' > jar/custom_spider.jar.md5
+          echo "✅ 产出: jar/custom_spider.jar ($(du -h jar/custom_spider.jar | cut -f1))"
+
+      - name: 回写仓库（自持闭环）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add jar/custom_spider.jar jar/custom_spider.jar.md5
+          git commit -m "auto: 云编译 spider.jar $(date +%Y%m%d-%H%M)" || echo "无变更"
+          git push origin HEAD || echo "推送完成或无需推送"
+
+      - name: 上传附件（网页可直接下载）
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom_spider_jar
+          path: jar/custom_spider.jar
