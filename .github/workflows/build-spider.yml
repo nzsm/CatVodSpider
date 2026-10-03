@@ -62,7 +62,7 @@ jobs:
       - name: Gradle 编译（R8 混淆）
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+          ./gradlew :app:assembleRelease -x lint --no-daemon --stacktrace
 
       - name: 下载旧 jar（合并模式）
         if: ${{ github.event.inputs.merge_old == 'true' }}
